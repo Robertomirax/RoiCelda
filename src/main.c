@@ -8,6 +8,8 @@ UART_HandleTypeDef huart1;
 #define HX711_DT_PIN   GPIO_PIN_0
 #define HX711_SCK_PORT GPIOA
 #define HX711_SCK_PIN  GPIO_PIN_1
+#define LED_PORT       GPIOC
+#define LED_PIN        GPIO_PIN_13
 
 void SysTick_Handler(void) {
     HAL_IncTick();
@@ -15,6 +17,7 @@ void SysTick_Handler(void) {
 
 void GPIO_Init(void) {
     __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
@@ -31,6 +34,12 @@ void GPIO_Init(void) {
     HAL_GPIO_Init(HX711_SCK_PORT, &GPIO_InitStruct);
 
     HAL_GPIO_WritePin(HX711_SCK_PORT, HX711_SCK_PIN, GPIO_PIN_RESET);
+
+    GPIO_InitStruct.Pin = LED_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(LED_PORT, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(LED_PORT, LED_PIN, GPIO_PIN_SET);
 }
 
 void UART1_Init(void) {
@@ -90,6 +99,7 @@ int main(void) {
         int32_t valor_raw = HX711_Read();
         snprintf(buffer, sizeof(buffer), "Lectura RAW HX711: %ld\r\n", valor_raw);
         HAL_UART_Transmit(&huart1, (uint8_t*)buffer, strlen(buffer), HAL_MAX_DELAY);
+        HAL_GPIO_TogglePin(LED_PORT, LED_PIN);
         HAL_Delay(500);
     }
 }
