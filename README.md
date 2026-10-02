@@ -1,17 +1,18 @@
 # RoiCelda
 
-Firmware para una celda de carga conectada a un ADC ADS1232 y controlada por un STM32F103C8T6 (Blue Pill). El equipo captura lecturas del ADC, elimina valores extremos, calcula el peso en gramos y lo envia por USART1.
+Firmware para una celda de carga conectada a un ADC ADS1232 y un sensor DS18B20, controlados por un STM32F103C8T6 (Blue Pill). El equipo filtra las lecturas de peso, mide la temperatura y envia ambos valores por USART1.
 
 ## Estado actual
 
 - Microcontrolador: STM32F103C8T6.
 - Framework: STM32Cube HAL mediante PlatformIO.
 - ADC: ADS1232, lectura serie de 24 bits.
-- Lecturas por resultado: 160.
-- Valores descartados: 10 menores y 10 mayores.
-- Lecturas usadas para el promedio: 140.
+- Temperatura: DS18B20 mediante 1-Wire en PA8, con CRC del scratchpad.
+- Lecturas crudas solicitadas por resultado: entre 1024 y 4096, agrupadas en bloques de 16.
+- Filtrado de peso: valor central superior de cada bloque, rechazo de outliers por IQR, promedio de las medianas aceptadas y EMA dinamico.
+- Filtrado de temperatura: dos bloques de tres conversiones, rechazo de outliers por IQR y EMA dinamico.
 - Salida serie: 115200 baudios, 8 bits, sin paridad, 1 bit de parada (8N1).
-- Intervalo entre resultados: 100 ms, ademas del tiempo necesario para capturar las 160 conversiones.
+- Pausa final entre resultados: 100 ms, ademas del tiempo de captura y filtrado.
 
 ## Hardware y conexiones
 
@@ -31,6 +32,16 @@ Conexion de la comunicacion serie:
 | RX desde el adaptador USB-UART | PA10 (USART1_RX) |
 | GND | GND comun |
 
+Conexion del DS18B20 en modo de tres hilos:
+
+| Funcion | STM32F103C8T6 | DS18B20 |
+| --- | --- | --- |
+| Datos 1-Wire | PA8 | DQ |
+| Alimentacion | 3.3 V | VDD |
+| Referencia comun | GND | GND |
+
+Instalar una resistencia pull-up de 4.7 kOhm entre PA8/DQ y 3.3 V, salvo que el modulo del sensor ya la incluya. No alimentar DQ con 5 V. El firmware usa `Skip ROM`, por lo que esta configurado para un solo DS18B20 en el bus.
+
 El LED de estado esta conectado a PC13. En la mayoria de placas Blue Pill es activo en nivel bajo, pero el programa lo usa como indicador de actividad y lo conmuta despues de cada resultado.
 
 > Verificar niveles logicos, alimentacion y masa comun antes de conectar el ADS1232 o el adaptador USB-UART. No conectar una senal de 5 V directamente a una entrada de 3.3 V.
@@ -42,10 +53,11 @@ El LED de estado esta conectado a PC13. En la mayoria de placas Blue Pill es act
 3. `UART1_Init()` configura USART1 a 115200 8N1.
 4. El programa espera que DOUT indique una conversion disponible.
 5. Lee 24 bits por medio de SCLK y extiende el signo para obtener un `int32_t`.
-6. Repite la lectura hasta reunir 160 muestras.
-7. Ordena las muestras, descarta las 10 mas bajas y las 10 mas altas, y promedia las 140 restantes.
-8. Convierte las cuentas filtradas a gramos y envia el resultado por UART.
-9. Si DOUT permanece ocupado durante 1 segundo, envia un mensaje de timeout.
+6. Inicia una conversion del DS18B20 y captura hasta 4096 lecturas del ADS1232 en bloques de 16. La captura puede detenerse al agotarse el presupuesto de 9.5 s, una vez reunidos al menos ocho bloques.
+7. Calcula el valor central superior de cada bloque, aplica rechazo de outliers por IQR a esos valores, promedia los aceptados y aplica el EMA dinamico.
+8. Espera a que termine la conversion inicial del DS18B20 si aun esta en curso y captura las conversiones restantes del filtro de temperatura.
+9. Verifica el CRC del DS18B20, convierte las cuentas filtradas a gramos y envia peso y temperatura por UART.
+10. Si DOUT permanece ocupado durante 1 segundo en una lectura, envia un mensaje de timeout.
 
 El codigo principal esta en [src/main.c](src/main.c).
 
@@ -72,34 +84,34 @@ La tara es la lectura de la plataforma sin carga. Para recalcularla:
 2. Descomentar `ADS1232_HacerTara();` en `main()`.
 3. Compilar y cargar el firmware.
 4. Esperar a que termine la medicion inicial.
-5. Copiar el valor obtenido a `g_offset_tara` si se desea dejarlo fijo.
+5. Consultar `g_offset_tara` en el depurador y copiar su valor inicializado si se desea conservarlo tras reiniciar.
 6. Volver a comentar la llamada si no se quiere repetir la tara en cada arranque.
 
-La tara usa el mismo bloque de 160 muestras y el mismo filtro que la medicion normal.
+La llamada de tara esta antes del bucle principal: si se habilita, se ejecuta una vez al arrancar. Usa el filtro de peso hasta 4096 muestras, sin actualizar el estado del EMA. La nueva tara solo queda en RAM mientras el equipo esta encendido; para conservarla tras reiniciar, actualizar `g_offset_tara` en el codigo.
 
 ### Factor de escala
 
 Para obtener un factor nuevo con un peso patron conocido:
 
-1. Establecer una tara valida.
-2. Colocar un peso conocido sobre la celda.
-3. Ejecutar `ADS1232_CalibrarEscala(peso_en_gramos);` desde el codigo.
+1. Habilitar la definicion comentada de `ADS1232_CalibrarEscala()` en `src/main.c`.
+2. Establecer una tara valida y colocar un peso conocido sobre la celda.
+3. Agregar una llamada a `ADS1232_CalibrarEscala(peso_en_gramos);` antes del bucle principal.
 4. Observar el valor calculado de `g_factor_escala` en el depurador o imprimirlo por UART.
 5. Guardar ese valor en el codigo y desactivar la llamada de calibracion.
 
-La funcion de calibracion esta documentada dentro de `src/main.c`, pero permanece desactivada porque necesita intervencion fisica del operador.
+La funcion y la llamada permanecen desactivadas porque la calibracion requiere colocar fisicamente el peso patron. El nuevo factor solo queda en RAM; copiarlo a `g_factor_escala` para conservarlo despues de reiniciar.
 
 ## Filtro de muestras
 
-`NUM_MUESTRAS_FILTRO` controla el tamano del bloque y actualmente vale 160. `MUESTRAS_DESCARTADAS` controla cuantos valores se eliminan en cada extremo y vale 10.
+`FILTRO_OVERSAMPLE_MUESTRAS` solicita 4096 lecturas crudas y puede tomar valores entre `FILTRO_OVERSAMPLE_MIN` (1024) y `FILTRO_OVERSAMPLE_MAX` (4096). Cada bloque contiene 16 lecturas; su valor central superior alimenta el rechazo de outliers por IQR y el promedio de medianas aceptadas. El resultado pasa por un EMA dinamico.
 
-El filtro ordena el bloque completo usando `qsort()`. Con la configuracion actual:
+Con la configuracion maxima:
 
 ```text
-160 muestras - 10 minimas - 10 maximas = 140 muestras promediadas
+4096 lecturas / 16 por bloque = 256 valores de bloque antes del rechazo IQR
 ```
 
-El buffer ocupa 640 bytes en la pila (160 valores de 32 bits). El STM32F103C8T6 dispone de 20 KB de RAM, por lo que el consumo actual es adecuado. Si se aumenta el numero de muestras, revisar el uso de pila y memoria.
+El arreglo de medianas ocupa 1024 bytes en la pila con el oversampling maximo (256 valores de 32 bits), ademas de los arreglos temporales de cada bloque. El STM32F103C8T6 dispone de 20 KB de RAM; considerar tambien el resto del uso de pila al cambiar los limites del filtro.
 
 ## Compilacion
 
@@ -132,8 +144,10 @@ El puerto `COM1` solo debe usarse si el metodo de carga conectado realmente apar
 Abrir un monitor a 115200 baudios, 8N1. La salida normal tiene este formato:
 
 ```text
-RAW: 123456 | Peso: 42.50 g
+RAW: 123456 | Peso: 42.500 g | Temperatura: 23.500 C
 ```
+
+Si no se detecta el DS18B20 o falla el CRC, la temperatura se muestra como `N/D`. Si falla el ADS1232, se informa el timeout y se muestra la temperatura cuando su lectura fue valida.
 
 Si el ADS1232 no entrega una conversion dentro del tiempo limite:
 
@@ -177,12 +191,12 @@ Recalcular `g_factor_escala` usando un peso patron conocido.
 - Confirmar que la celda esta mecanicamente fija.
 - Revisar cables, masa y alimentacion.
 - Mantener las conexiones de senal cortas.
-- Aumentar `NUM_MUESTRAS_FILTRO` solo si la latencia adicional es aceptable.
-- Ajustar `MUESTRAS_DESCARTADAS` si el ruido produce valores atipicos frecuentes.
+- Aumentar `FILTRO_OVERSAMPLE_MUESTRAS` solo si la latencia adicional es aceptable.
+- Revisar `FILTRO_MEDIANA_BLOQUE`, `FILTRO_IQR_FACTOR` y el presupuesto de tiempo si el ruido produce valores atipicos frecuentes.
 
 ## Limitaciones conocidas
 
 - La calibracion se guarda en el codigo; no existe memoria no volatil para conservarla automaticamente.
 - `delay_us()` es una espera aproximada dependiente de `SystemCoreClock`.
 - La lectura es bloqueante mientras espera cada conversion del ADS1232.
-- El filtrado necesita guardar todas las muestras del bloque antes de calcular el promedio.
+- El filtrado necesita guardar las medianas de bloque antes de calcular el promedio; con los limites actuales ocupa 1024 bytes para ese arreglo.
